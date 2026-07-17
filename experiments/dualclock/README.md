@@ -133,17 +133,19 @@ python -m experiments.dualclock.freeze_outputs \
 
 The manifest generator writes exactly 100 prompts spanning texture, geometry,
 people, animals, text rendering, repeated structures, entity counting, and
-spatial relations. Use the released inference path so the Gemma text encoder
-and solver are reproduced:
+spatial relations. The published checkpoint is a 1024px stage-3 model; there is
+no separately released 512px checkpoint. The 512 run therefore evaluates the
+released stage-3 recipe at a lower output resolution and must be labeled as
+such. Do not pair the released checkpoint with the stage-1 training config.
 
 ```bash
 cd t2i
 python inference.py \
-  --config configs/PixelDiT_512px_pixel_diffusion_stage1.yaml \
+  --config configs/PixelDiT_1024px_pixel_diffusion_stage3.yaml \
   --model_path pixeldit_t2i_v1.pth \
   --txt_file ../experiments/dualclock/regression/t2i_prompts_100.txt \
   --custom_height 512 --custom_width 512 \
-  --cfg_scale 3.5 --step 50 --seed 2045000 \
+  --cfg_scale 2.75 --step 50 --seed 2045000 \
   --negative_prompt "low quality, worst quality, over-saturated, blurry, deformed, watermark" \
   --sample_nums 100 --bs 1 \
   --work_dir ../experiments/dualclock/reports/t2i512_samples

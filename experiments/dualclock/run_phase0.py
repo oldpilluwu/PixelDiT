@@ -38,16 +38,20 @@ CASES = {
         },
     },
     "t2i512": {
-        "config": "t2i/configs/PixelDiT_512px_pixel_diffusion_stage1.yaml",
+        # The released checkpoint is the 1024px stage-3 model. Evaluate it at
+        # 512px with its released scheduler/configuration; the stage-1 config
+        # describes training from scratch and is not a released 512 checkpoint.
+        "config": "t2i/configs/PixelDiT_1024px_pixel_diffusion_stage3.yaml",
         "checkpoint": "pixeldit_t2i_v1.pth",
         "height": 512,
         "width": 512,
         "sampling": {
             "solver": "flow_dpm-solver",
             "nfe": 50,
-            "cfg_scale": 3.5,
+            "cfg_scale": 2.75,
             "cfg_interval": [0.0, 1.0],
-            "flow_shift": 3.0,
+            "flow_shift": 4.0,
+            "support_status": "released_1024_checkpoint_evaluated_at_512",
         },
     },
     "t2i1024": {

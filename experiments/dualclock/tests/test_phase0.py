@@ -7,6 +7,7 @@ import torch
 from experiments.dualclock.benchmark import account_component_envelopes, estimate_flops
 from experiments.dualclock.common import load_weights
 from experiments.dualclock.parity import compare, extract_and_reinject
+from experiments.dualclock.run_phase0 import CASES
 from pixdit_core.pixeldit_c2i import PixDiT
 from pixdit_core.pixeldit_t2i import PixDiT_T2I
 
@@ -134,6 +135,12 @@ class Phase0Test(unittest.TestCase):
         result = compare(torch.zeros(4), torch.ones(4), atol=0.0, rtol=0.0)
         self.assertFalse(result["allclose"])
         self.assertEqual(result["max_abs"], 1.0)
+
+    def test_t2i512_uses_released_stage3_recipe(self):
+        case = CASES["t2i512"]
+        self.assertIn("1024px_pixel_diffusion_stage3", case["config"])
+        self.assertEqual(case["sampling"]["cfg_scale"], 2.75)
+        self.assertEqual(case["sampling"]["flow_shift"], 4.0)
 
 
 if __name__ == "__main__":
