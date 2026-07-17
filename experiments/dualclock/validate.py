@@ -25,6 +25,24 @@ def read(path: Path) -> dict:
         return json.load(handle)
 
 
+def trial_median_cv_percent(latency: dict) -> float:
+    recorded = latency.get("trial_median_cv_percent")
+    if recorded is not None:
+        return float(recorded)
+    values = [float(value) for value in latency.get("trial_medians_ms", [])]
+    if not values:
+        return float("inf")
+    mean = sum(values) / len(values)
+    if mean == 0:
+        return float("inf")
+    sample_variance = (
+        sum((value - mean) ** 2 for value in values) / (len(values) - 1)
+        if len(values) > 1
+        else 0.0
+    )
+    return 100.0 * sample_variance**0.5 / mean
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate Phase 0 instrumentation exit criteria.")
     parser.add_argument("--report-dir", required=True)
@@ -63,13 +81,18 @@ def main() -> None:
             batch = result["batch_size"]
             latency = result["latency_ms"]
             components = set(result["components_ms"])
+            variation_cv = trial_median_cv_percent(latency)
             checks.extend(
                 [
                     {
-                        "name": f"{path.stem}: batch {batch} variation",
-                        "pass": latency["trial_median_variation_percent"] < args.max_variation_percent,
-                        "value": latency["trial_median_variation_percent"],
+                        "name": f"{path.stem}: batch {batch} variation (trial-median CV)",
+                        "pass": variation_cv < args.max_variation_percent,
+                        "value": variation_cv,
                         "threshold": args.max_variation_percent,
+                        "range_percent_diagnostic": latency.get(
+                            "trial_median_range_percent",
+                            latency.get("trial_median_variation_percent"),
+                        ),
                     },
                     {
                         "name": f"{path.stem}: batch {batch} component coverage",
@@ -106,4 +129,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

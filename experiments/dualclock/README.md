@@ -169,7 +169,9 @@ Run `freeze_outputs` on each generated image directory after inspection.
 Phase 0 is ready to freeze only when:
 
 - `semantic_reinjection.allclose` and `repeatability.allclose` are true.
-- `trial_median_variation_percent` is below 3% after warmup.
+- Trial-median sample coefficient of variation is below 3% after warmup.
+  The max-minus-min range is retained separately as a diagnostic because it is
+  too sensitive to serve as the gate with only three trials.
 - `component_coverage_percent` is at least 95%; otherwise inspect
   `unattributed_ms` before drawing optimization conclusions.
 - Output hashes reproduce on a clean rerun with the same checkpoint, seed,

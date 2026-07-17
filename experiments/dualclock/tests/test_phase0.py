@@ -8,6 +8,7 @@ from experiments.dualclock.benchmark import account_component_envelopes, estimat
 from experiments.dualclock.common import load_weights
 from experiments.dualclock.parity import compare, extract_and_reinject
 from experiments.dualclock.run_phase0 import CASES
+from experiments.dualclock.validate import trial_median_cv_percent
 from pixdit_core.pixeldit_c2i import PixDiT
 from pixdit_core.pixeldit_t2i import PixDiT_T2I
 
@@ -141,6 +142,10 @@ class Phase0Test(unittest.TestCase):
         self.assertIn("1024px_pixel_diffusion_stage3", case["config"])
         self.assertEqual(case["sampling"]["cfg_scale"], 2.75)
         self.assertEqual(case["sampling"]["flow_shift"], 4.0)
+
+    def test_trial_median_cv_uses_sample_standard_deviation(self):
+        latency = {"trial_medians_ms": [84.99011993408203, 82.08711242675781, 82.21331787109375]}
+        self.assertAlmostEqual(trial_median_cv_percent(latency), 1.9746, places=3)
 
 
 if __name__ == "__main__":

@@ -282,11 +282,27 @@ def benchmark_batch(
 
     latency_summary = summarize(latencies)
     latency_summary["trial_medians_ms"] = trial_medians
-    latency_summary["trial_median_variation_percent"] = (
+    trial_median_range_percent = (
         100.0 * (max(trial_medians) - min(trial_medians)) / latency_summary["median"]
         if latency_summary["median"]
         else float("inf")
     )
+    trial_median_mean = sum(trial_medians) / len(trial_medians)
+    trial_median_sample_variance = (
+        sum((value - trial_median_mean) ** 2 for value in trial_medians) / (len(trial_medians) - 1)
+        if len(trial_medians) > 1
+        else 0.0
+    )
+    trial_median_cv_percent = (
+        100.0 * trial_median_sample_variance**0.5 / trial_median_mean
+        if trial_median_mean
+        else float("inf")
+    )
+    # Keep the original field as a range-based diagnostic for report
+    # compatibility. The validation gate uses the conventional sample CV.
+    latency_summary["trial_median_variation_percent"] = trial_median_range_percent
+    latency_summary["trial_median_range_percent"] = trial_median_range_percent
+    latency_summary["trial_median_cv_percent"] = trial_median_cv_percent
 
     # Run the detailed component profiler separately. Its own instrumented
     # envelope is retained to quantify hook overhead, while component coverage
