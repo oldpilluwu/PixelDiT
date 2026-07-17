@@ -44,7 +44,7 @@ def estimate_flops(
     flops: dict[str, int] = defaultdict(int)
 
     flops["patch_embedding_text_projection"] += 2 * batch * patches * (channels * pixels_per_patch) * hidden
-    flops["conditioning"] += 4 * batch * 256 * hidden + 4 * batch * hidden * hidden
+    flops["conditioning"] += 2 * batch * 256 * hidden + 2 * batch * hidden * hidden
 
     if mode == "c2i":
         semantic_tokens = patches
@@ -92,6 +92,7 @@ def estimate_flops(
 
 def module_categories(model: torch.nn.Module) -> dict[torch.nn.Module, str]:
     categories: dict[torch.nn.Module, str] = {
+        model: "__model_total",
         model.s_embedder: "patch_embedding_text_projection",
         model.t_embedder: "conditioning",
         model.pixel_embedder: "pixel_embedding",
@@ -101,6 +102,7 @@ def module_categories(model: torch.nn.Module) -> dict[torch.nn.Module, str]:
         category = "conditioning" if model.__class__.__name__ == "PixDiT" else "patch_embedding_text_projection"
         categories[model.y_embedder] = category
     for block in model.patch_blocks:
+        categories[block] = "__patch_blocks_total"
         if isinstance(block, AugmentedDiTBlock):
             categories[block.attn] = "patch_attention"
             categories[block.mlp] = "patch_mlp"
@@ -122,6 +124,7 @@ def module_categories(model: torch.nn.Module) -> dict[torch.nn.Module, str]:
     for block in model.pixel_blocks:
         if not isinstance(block, PiTBlock):
             continue
+        categories[block] = "__pit_blocks_total"
         for module in (block.adaLN_modulation, block.norm1, block.norm2):
             categories[module] = "pit_adaln"
         categories[block.compress_to_attn] = "pit_compaction_expansion"
@@ -129,6 +132,41 @@ def module_categories(model: torch.nn.Module) -> dict[torch.nn.Module, str]:
         categories[block.attn] = "pit_attention"
         categories[block.mlp] = "pit_mlp"
     return categories
+
+
+def account_component_envelopes(raw: dict[str, float]) -> tuple[dict[str, float], dict[str, float]]:
+    """Convert overlapping parent envelopes into mutually exclusive components."""
+    values = dict(raw)
+    model_total = values.pop("__model_total", 0.0)
+    patch_total = values.pop("__patch_blocks_total", 0.0)
+    pit_total = values.pop("__pit_blocks_total", 0.0)
+    direct_total = sum(values.values())
+
+    patch_children = sum(values.get(name, 0.0) for name in ("patch_attention", "patch_mlp", "patch_adaln"))
+    pit_children = sum(
+        values.get(name, 0.0)
+        for name in ("pit_attention", "pit_mlp", "pit_adaln", "pit_compaction_expansion")
+    )
+    values["patch_residual_tensor_ops"] = max(patch_total - patch_children, 0.0)
+    values["pit_residual_tensor_ops"] = max(pit_total - pit_children, 0.0)
+
+    top_level_children = (
+        patch_total
+        + pit_total
+        + values.get("patch_embedding_text_projection", 0.0)
+        + values.get("conditioning", 0.0)
+        + values.get("pixel_embedding", 0.0)
+        + values.get("final_projection_reconstruction", 0.0)
+        + values.get("patchify_reconstruction", 0.0)
+    )
+    values["model_tensor_rearrangement"] = max(model_total - top_level_children, 0.0)
+    diagnostics = {
+        "instrumented_model_envelope_ms": model_total,
+        "instrumented_patch_envelope_ms": patch_total,
+        "instrumented_pit_envelope_ms": pit_total,
+        "direct_leaf_components_ms": direct_total,
+    }
+    return values, diagnostics
 
 
 class ComponentTimer:
@@ -212,6 +250,7 @@ def benchmark_batch(
     warmup: int,
     repeats: int,
     trials: int,
+    component_repeats: int,
     component_detail: bool,
 ) -> dict[str, Any]:
     x, t, y = make_inputs(model, mode, batch, height, width, dtype, device, text_length, seed)
@@ -219,33 +258,27 @@ def benchmark_batch(
         model(x, t, y)
     torch.cuda.synchronize(device)
 
-    timer_context = ComponentTimer(model) if component_detail else contextlib.nullcontext(None)
+    # Measure the service latency without hooks first. Hundreds of per-module
+    # CUDA events create CPU dispatch gaps on fast GPUs and must never be part
+    # of the end-to-end baseline or its stability calculation.
     latencies: list[float] = []
     peaks: list[int] = []
-    components: dict[str, list[float]] = defaultdict(list)
     trial_medians: list[float] = []
-    with timer_context as timer:
-        for _trial in range(trials):
-            trial_values = []
-            for _repeat in range(repeats):
-                if timer is not None:
-                    timer.clear()
-                torch.cuda.reset_peak_memory_stats(device)
-                start = torch.cuda.Event(enable_timing=True)
-                end = torch.cuda.Event(enable_timing=True)
-                start.record()
-                with time_patchify(timer):
-                    model(x, t, y)
-                end.record()
-                torch.cuda.synchronize(device)
-                elapsed = start.elapsed_time(end)
-                latencies.append(elapsed)
-                trial_values.append(elapsed)
-                peaks.append(torch.cuda.max_memory_allocated(device))
-                if timer is not None:
-                    for category, value in timer.elapsed().items():
-                        components[category].append(value)
-            trial_medians.append(percentile(trial_values, 0.5))
+    for _trial in range(trials):
+        trial_values = []
+        for _repeat in range(repeats):
+            torch.cuda.reset_peak_memory_stats(device)
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record()
+            model(x, t, y)
+            end.record()
+            torch.cuda.synchronize(device)
+            elapsed = start.elapsed_time(end)
+            latencies.append(elapsed)
+            trial_values.append(elapsed)
+            peaks.append(torch.cuda.max_memory_allocated(device))
+        trial_medians.append(percentile(trial_values, 0.5))
 
     latency_summary = summarize(latencies)
     latency_summary["trial_medians_ms"] = trial_medians
@@ -254,12 +287,71 @@ def benchmark_batch(
         if latency_summary["median"]
         else float("inf")
     )
+
+    # Run the detailed component profiler separately. Its own instrumented
+    # envelope is retained to quantify hook overhead, while component coverage
+    # is compared with the clean median above.
+    components: dict[str, list[float]] = defaultdict(list)
+    envelope_diagnostics: dict[str, list[float]] = defaultdict(list)
+    instrumented_latencies: list[float] = []
+    if component_detail:
+        with ComponentTimer(model) as timer:
+            timer.clear()
+            with time_patchify(timer):
+                model(x, t, y)
+            torch.cuda.synchronize(device)
+            for _repeat in range(component_repeats):
+                timer.clear()
+                start = torch.cuda.Event(enable_timing=True)
+                end = torch.cuda.Event(enable_timing=True)
+                start.record()
+                with time_patchify(timer):
+                    model(x, t, y)
+                end.record()
+                torch.cuda.synchronize(device)
+                instrumented_latencies.append(start.elapsed_time(end))
+                accounted, diagnostics = account_component_envelopes(timer.elapsed())
+                for category, value in accounted.items():
+                    components[category].append(value)
+                for name, value in diagnostics.items():
+                    envelope_diagnostics[name].append(value)
+
     component_summary = {name: summarize(values) for name, values in sorted(components.items())}
     measured_component_ms = sum(item["median"] for item in component_summary.values())
-    latency_summary["component_coverage_percent"] = (
+    raw_coverage = (
         100.0 * measured_component_ms / latency_summary["median"] if latency_summary["median"] else 0.0
     )
+    direct_names = {
+        "patch_embedding_text_projection",
+        "conditioning",
+        "patch_attention",
+        "patch_mlp",
+        "patch_adaln",
+        "pixel_embedding",
+        "pit_adaln",
+        "pit_compaction_expansion",
+        "pit_attention",
+        "pit_mlp",
+        "final_projection_reconstruction",
+        "patchify_reconstruction",
+    }
+    direct_component_ms = sum(
+        component_summary[name]["median"] for name in direct_names if name in component_summary
+    )
+    latency_summary["direct_component_coverage_percent"] = (
+        100.0 * direct_component_ms / latency_summary["median"] if latency_summary["median"] else 0.0
+    )
+    latency_summary["component_coverage_percent"] = min(raw_coverage, 100.0)
+    latency_summary["component_coverage_raw_percent"] = raw_coverage
     latency_summary["unattributed_ms"] = max(latency_summary["median"] - measured_component_ms, 0.0)
+    latency_summary["component_sum_excess_ms"] = max(measured_component_ms - latency_summary["median"], 0.0)
+    instrumented_summary = summarize(instrumented_latencies) if instrumented_latencies else None
+    if instrumented_summary is not None:
+        instrumented_summary["overhead_percent_vs_clean"] = (
+            100.0 * (instrumented_summary["median"] - latency_summary["median"]) / latency_summary["median"]
+            if latency_summary["median"]
+            else float("inf")
+        )
     flops = estimate_flops(model, mode, batch, height, width, text_length)
     total_flops = sum(flops.values())
     return {
@@ -268,6 +360,11 @@ def benchmark_batch(
         "peak_allocated_bytes": max(peaks),
         "throughput_images_per_second": 1000.0 * batch / latency_summary["median"],
         "components_ms": component_summary,
+        "component_envelopes_ms": {
+            name: summarize(values) for name, values in sorted(envelope_diagnostics.items())
+        },
+        "component_profile_latency_ms": instrumented_summary,
+        "component_profile_repeats": component_repeats if component_detail else 0,
         "estimated_flops": {
             name: {"flops": value, "gflops": value / 1e9, "percent": 100.0 * value / total_flops}
             for name, value in sorted(flops.items())
@@ -343,6 +440,7 @@ def main() -> None:
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--repeats", type=int, default=20)
     parser.add_argument("--trials", type=int, default=3)
+    parser.add_argument("--component-repeats", type=int, default=10)
     parser.add_argument("--compile", action="store_true")
     parser.add_argument("--compile-mode", default="default")
     parser.add_argument("--total-only", action="store_true")
@@ -401,6 +499,7 @@ def main() -> None:
                 args.warmup,
                 args.repeats,
                 args.trials,
+                args.component_repeats,
                 component_detail,
             )
         )
@@ -412,6 +511,9 @@ def main() -> None:
         )
 
     report = {
+        "benchmark_schema_version": 2,
+        "latency_measurement": "clean_uninstrumented_cuda_events",
+        "component_measurement": "separate_instrumented_cuda_events",
         "mode": mode,
         "config": args.config,
         "checkpoint": weight_report,
@@ -424,6 +526,7 @@ def main() -> None:
         "warmup": args.warmup,
         "repeats_per_trial": args.repeats,
         "trials": args.trials,
+        "component_repeats": args.component_repeats if component_detail else 0,
         "results": results,
     }
     write_json(args.output, report)

@@ -77,6 +77,9 @@ python -m experiments.dualclock.run_phase0 --cases c2i256 \
 The automatic batch search intentionally allocates up to the given cap. Reduce
 the cap on a shared GPU. Run with no other GPU workload, lock clocks if your
 server policy permits it, and record any clock lock in the environment report.
+Clean end-to-end latency is collected without module hooks. Component timings
+are collected in a separate instrumented pass (`--component-repeats`, default
+10), and the report records that pass's overhead relative to the clean median.
 
 ## Generate frozen C2I regression outputs
 

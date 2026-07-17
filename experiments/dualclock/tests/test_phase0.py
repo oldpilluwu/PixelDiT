@@ -4,7 +4,7 @@ from pathlib import Path
 
 import torch
 
-from experiments.dualclock.benchmark import estimate_flops
+from experiments.dualclock.benchmark import account_component_envelopes, estimate_flops
 from experiments.dualclock.common import load_weights
 from experiments.dualclock.parity import compare, extract_and_reinject
 from pixdit_core.pixeldit_c2i import PixDiT
@@ -105,6 +105,30 @@ class Phase0Test(unittest.TestCase):
         }
         self.assertTrue(required.issubset(result))
         self.assertTrue(all(value >= 0 for value in result.values()))
+
+    def test_component_envelopes_produce_exclusive_accounting(self):
+        accounted, diagnostics = account_component_envelopes(
+            {
+                "__model_total": 100.0,
+                "__patch_blocks_total": 60.0,
+                "__pit_blocks_total": 20.0,
+                "patch_attention": 20.0,
+                "patch_mlp": 25.0,
+                "patch_adaln": 5.0,
+                "pit_attention": 5.0,
+                "pit_mlp": 4.0,
+                "pit_adaln": 3.0,
+                "pit_compaction_expansion": 3.0,
+                "conditioning": 5.0,
+                "pixel_embedding": 2.0,
+                "final_projection_reconstruction": 3.0,
+            }
+        )
+        self.assertEqual(accounted["patch_residual_tensor_ops"], 10.0)
+        self.assertEqual(accounted["pit_residual_tensor_ops"], 5.0)
+        self.assertEqual(accounted["model_tensor_rearrangement"], 10.0)
+        self.assertEqual(sum(accounted.values()), 100.0)
+        self.assertEqual(diagnostics["instrumented_model_envelope_ms"], 100.0)
 
     def test_compare_detects_difference(self):
         result = compare(torch.zeros(4), torch.ones(4), atol=0.0, rtol=0.0)

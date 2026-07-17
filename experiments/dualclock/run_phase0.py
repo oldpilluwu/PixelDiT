@@ -81,6 +81,7 @@ def main() -> None:
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--repeats", type=int, default=20)
     parser.add_argument("--trials", type=int, default=3)
+    parser.add_argument("--component-repeats", type=int, default=10)
     parser.add_argument("--compiled", action="store_true", help="Also record total-only torch.compile baselines.")
     parser.add_argument("--compile-mode", default="default")
     args = parser.parse_args()
@@ -172,6 +173,8 @@ def main() -> None:
             str(args.repeats),
             "--trials",
             str(args.trials),
+            "--component-repeats",
+            str(args.component_repeats),
             "--output",
             os.fspath(report_dir / f"{name}_eager.json"),
         ]
@@ -188,15 +191,23 @@ def main() -> None:
                     os.fspath(report_dir / f"{name}_compiled.json"),
                 ]
             )
-    run(
-        [
-            sys.executable,
-            "-m",
-            "experiments.dualclock.validate",
-            "--report-dir",
-            os.fspath(report_dir),
-        ]
-    )
+    try:
+        run(
+            [
+                sys.executable,
+                "-m",
+                "experiments.dualclock.validate",
+                "--report-dir",
+                os.fspath(report_dir),
+            ]
+        )
+    except subprocess.CalledProcessError as exc:
+        print(
+            f"Phase 0 instrumentation gate failed (exit {exc.returncode}). "
+            f"Reports were preserved at {report_dir}",
+            file=sys.stderr,
+        )
+        raise SystemExit(exc.returncode)
     print(f"Phase 0 reports: {report_dir}")
 
 
