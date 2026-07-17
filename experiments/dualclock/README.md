@@ -250,7 +250,9 @@ redirect DualClock.
 
 For a smoke test, use `--limit 2 --num-steps 5`, disable the expensive grouped
 influence probes with `--token-groups 0 --channel-groups 0`, and then analyze
-the resulting directory. Run the complete local test suite with:
+the resulting directory. Smoke analysis is reported as `INSUFFICIENT EVIDENCE`;
+the default hypothesis gate requires at least 100 trajectories with 100 solver
+evaluations. Run the complete local test suite with:
 
 ```bash
 python -m unittest \

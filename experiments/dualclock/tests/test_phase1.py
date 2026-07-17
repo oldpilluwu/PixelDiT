@@ -173,6 +173,10 @@ class Phase1Test(unittest.TestCase):
         self.assertIn("semantic_velocity_error_correlation", report)
         self.assertIn("decoder_sensitivity", report)
         self.assertIn("candidates", report["gate"])
+        self.assertEqual(report["gate"]["status"], "insufficient_evidence")
+        self.assertFalse(
+            any("/head_" in name for name in report["gate"]["candidates"])
+        )
 
     def test_cost_model_speedup(self):
         cost = {"available": True, "semantic_fraction": 0.75}

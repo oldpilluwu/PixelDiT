@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -250,12 +251,17 @@ def _median_from_summary(report: dict[str, Any], metric: str) -> float:
 
 def _render_markdown(report: dict[str, Any]) -> str:
     gate = report["gate"]
+    status = gate["status"].replace("_", " ").upper()
     lines = [
         "# DualClock Phase 1 analysis",
         "",
-        f"Overall gate: **{'PASS' if gate['pass'] else 'DO NOT PROCEED'}**",
+        f"Overall gate: **{status}**",
         "",
-        f"Traces: {report['trace_count']} shards / {report['sample_count']} trajectories.",
+        (
+            f"Traces: {report['trace_count']} shards / "
+            f"{report['sample_count']} trajectories / "
+            f"{report['minimum_recorded_steps']} minimum recorded steps."
+        ),
         f"Activation storage: `{report['activation_storage']}`.",
         "",
         "## Pass conditions",
@@ -265,6 +271,18 @@ def _render_markdown(report: dict[str, Any]) -> str:
     ]
     for name, value in gate["conditions"].items():
         lines.append(f"| {name.replace('_', ' ')} | {'pass' if value else 'fail'} |")
+    if gate["status"] == "insufficient_evidence":
+        requirements = gate["evidence_requirements"]
+        lines.extend(
+            [
+                "",
+                (
+                    "This run is an instrumentation smoke test, not a valid hypothesis "
+                    f"gate. The gate requires at least {requirements['min_trajectories']} "
+                    f"trajectories and {requirements['min_steps']} solver evaluations."
+                ),
+            ]
+        )
     lines.extend(["", "## Candidate semantic states", ""])
     for name, candidate in gate["candidates"].items():
         speed = candidate.get("predicted_speedup")
@@ -272,7 +290,7 @@ def _render_markdown(report: dict[str, Any]) -> str:
         lines.append(
             f"- `{name}`: curvature={candidate['curvature']:.6g}, "
             f"quality interval={candidate.get('quality_refresh_interval')}, speed={speed_text}, "
-            f"{'pass' if candidate['pass'] else 'fail'}."
+            f"{'meets conditions' if candidate['meets_conditions'] else 'does not meet conditions'}."
         )
     lines.extend(
         [
@@ -293,6 +311,8 @@ def analyze(
     substantial_factor: float = 0.75,
     min_speedup: float = 1.5,
     analysis_dim: int = DEFAULT_ANALYSIS_DIM,
+    min_trajectories: int = 100,
+    min_steps: int = 100,
 ) -> dict[str, Any]:
     directory = Path(trace_dir)
     manifest_path = directory / "manifest.json"
@@ -311,6 +331,7 @@ def analyze(
     branch_curvature: dict[str, list[torch.Tensor]] = defaultdict(list)
     head_variation: dict[str, list[torch.Tensor]] = defaultdict(list)
     activation_modes: set[str] = set()
+    recorded_step_counts: list[int] = []
     sample_count = 0
 
     for shard_info in shards:
@@ -319,6 +340,7 @@ def analyze(
         sample_count += batch_size
         activation_modes.add(trace["activation_storage"])
         exact = trace["exact"]
+        recorded_step_counts.append(int(exact["timestep"].shape[0]))
         representations: dict[str, tuple[torch.Tensor, torch.Tensor | None]] = {
             "final_semantic": (exact["semantic"], None),
             "velocity/branches": (exact["velocity_branches"], None),
@@ -439,6 +461,11 @@ def analyze(
                 )
 
     cost = load_baseline_cost(baseline_report)
+    minimum_recorded_steps = min(recorded_step_counts, default=0)
+    evidence_sufficient = (
+        sample_count >= min_trajectories
+        and minimum_recorded_steps >= min_steps
+    )
     pit_curvatures = [
         _median_from_summary(value, "normalized_curvature")
         for name, value in representation_report.items()
@@ -451,7 +478,7 @@ def analyze(
     semantic_names = [
         name
         for name in representation_report
-        if name == "final_semantic" or name.startswith("patch/block_")
+        if name == "final_semantic" or re.fullmatch(r"patch/block_\d+", name)
     ]
     candidates: dict[str, Any] = {}
     for name in semantic_names:
@@ -491,7 +518,7 @@ def analyze(
                     method_at_interval = method
         speedup = predicted_speedup(cost, quality_interval)
         speed_condition = speedup is not None and speedup >= min_speedup
-        candidate_pass = (
+        candidate_meets_conditions = (
             lower_curvature
             and useful_predictability
             and better_than_generic
@@ -507,10 +534,20 @@ def analyze(
             "quality_method": method_at_interval,
             "predicted_speedup": speedup,
             "speed_condition": speed_condition,
-            "pass": candidate_pass,
+            "meets_conditions": candidate_meets_conditions,
+            "pass": candidate_meets_conditions and evidence_sufficient,
         }
-    overall_pass = any(candidate["pass"] for candidate in candidates.values())
+    hypothesis_pass = any(
+        candidate["meets_conditions"] for candidate in candidates.values()
+    )
+    overall_pass = evidence_sufficient and hypothesis_pass
+    status = (
+        "insufficient_evidence"
+        if not evidence_sufficient
+        else ("pass" if overall_pass else "do_not_proceed")
+    )
     conditions = {
+        "sufficient_evidence": evidence_sufficient,
         "lower_temporal_curvature": any(value["lower_than_pit_and_velocity"] for value in candidates.values()),
         "two_interval_predictability": any(value["useful_for_two_intervals"] for value in candidates.values()),
         "less_error_than_stale_generic": any(value["better_than_stale_generic"] for value in candidates.values()),
@@ -521,6 +558,7 @@ def analyze(
         "trace_directory": str(directory.resolve()),
         "trace_count": len(shards),
         "sample_count": sample_count,
+        "minimum_recorded_steps": minimum_recorded_steps,
         "activation_storage": sorted(activation_modes),
         "analysis_projection": {
             "max_features": analysis_dim,
@@ -556,13 +594,25 @@ def analyze(
         "decoder_sensitivity": sensitivity_report,
         "cost_model": cost,
         "gate": {
+            "status": status,
             "pass": overall_pass,
+            "hypothesis_conditions_met": hypothesis_pass,
             "conditions": conditions,
             "candidates": candidates,
+            "evidence_requirements": {
+                "min_trajectories": min_trajectories,
+                "min_steps": min_steps,
+                "observed_trajectories": sample_count,
+                "observed_minimum_steps": minimum_recorded_steps,
+            },
             "interpretation": (
-                "Proceed to Phase 2 only if pass is true."
-                if overall_pass
-                else "Phase 1 evidence does not satisfy the plan's continuation gate."
+                "This run is too small or too short to evaluate the Phase 1 gate."
+                if not evidence_sufficient
+                else (
+                    "Proceed to Phase 2."
+                    if overall_pass
+                    else "Phase 1 evidence does not satisfy the plan's continuation gate."
+                )
             ),
         },
     }
@@ -582,6 +632,8 @@ def main() -> None:
     parser.add_argument("--substantial-factor", type=float, default=0.75)
     parser.add_argument("--min-speedup", type=float, default=1.5)
     parser.add_argument("--analysis-dim", type=int, default=DEFAULT_ANALYSIS_DIM)
+    parser.add_argument("--min-trajectories", type=int, default=100)
+    parser.add_argument("--min-steps", type=int, default=100)
     args = parser.parse_args()
 
     trace_dir = Path(args.trace_dir)
@@ -602,6 +654,8 @@ def main() -> None:
         args.substantial_factor,
         args.min_speedup,
         args.analysis_dim,
+        args.min_trajectories,
+        args.min_steps,
     )
     output = Path(args.output_dir) if args.output_dir else trace_dir / "analysis"
     output.mkdir(parents=True, exist_ok=True)
@@ -610,7 +664,7 @@ def main() -> None:
     with open(output / "phase1_report.md", "w", encoding="utf-8") as handle:
         handle.write(_render_markdown(report))
     print(
-        f"Phase 1 {'PASS' if report['gate']['pass'] else 'DO NOT PROCEED'}: "
+        f"Phase 1 {report['gate']['status'].replace('_', ' ').upper()}: "
         f"{output.resolve()}"
     )
 
