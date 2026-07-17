@@ -240,6 +240,13 @@ class Phase1Test(unittest.TestCase):
             any("/head_" in name for name in report["gate"]["candidates"])
         )
         self.assertIn("raw_final_patch", report["gate"]["candidates"])
+        raw_curvature = report["representations"]["raw_final_patch"]["overall"][
+            "normalized_curvature"
+        ]["median"]
+        hooked_curvature = report["representations"]["patch/block_2"]["overall"][
+            "normalized_curvature"
+        ]["median"]
+        self.assertAlmostEqual(raw_curvature, hooked_curvature, places=6)
 
     def test_cost_model_speedup(self):
         cost = {"available": True, "semantic_fraction": 0.75}

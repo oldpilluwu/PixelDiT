@@ -292,6 +292,54 @@ def _render_markdown(report: dict[str, Any]) -> str:
             f"quality interval={candidate.get('quality_refresh_interval')}, speed={speed_text}, "
             f"{'meets conditions' if candidate['meets_conditions'] else 'does not meet conditions'}."
         )
+    references = report.get("curvature_references", {})
+    lines.extend(
+        [
+            "",
+            "## Curvature references",
+            "",
+            (
+                f"- Median PiT output curvature: "
+                f"`{references.get('median_pit_output_curvature', float('nan')):.6g}`"
+            ),
+            (
+                f"- Guided velocity curvature: "
+                f"`{references.get('guided_velocity_curvature', float('nan')):.6g}`"
+            ),
+            "",
+            "## Same-state substitution comparison",
+            "",
+            "| Method | Horizon | Relative velocity RMSE | Stale generic RMSE | Ratio |",
+            "| --- | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    substitutions = report.get("substitutions", {})
+    methods = (
+        "stale_semantic",
+        "linear_semantic",
+        "stale_raw_patch",
+        "linear_raw_patch",
+    )
+    for method in methods:
+        horizons = sorted(
+            {
+                int(key.split("/")[1][1:])
+                for key in substitutions
+                if key.startswith(method + "/h")
+            }
+        )
+        for horizon in horizons:
+            semantic_key = f"{method}/h{horizon}/guided/relative_rmse"
+            generic_key = f"stale_generic/h{horizon}/guided/relative_rmse"
+            semantic_rmse = substitutions.get(semantic_key, {}).get("median")
+            generic_rmse = substitutions.get(generic_key, {}).get("median")
+            if semantic_rmse is None or generic_rmse is None:
+                continue
+            ratio = semantic_rmse / generic_rmse if generic_rmse else float("inf")
+            lines.append(
+                f"| `{method}` | {horizon} | {semantic_rmse:.6g} | "
+                f"{generic_rmse:.6g} | {ratio:.4f} |"
+            )
     lines.extend(
         [
             "",
@@ -332,6 +380,7 @@ def analyze(
     branch_curvature: dict[str, list[torch.Tensor]] = defaultdict(list)
     head_variation: dict[str, list[torch.Tensor]] = defaultdict(list)
     activation_modes: set[str] = set()
+    effective_projection_dims: set[int] = set()
     modes: set[str] = set()
     recorded_step_counts: list[int] = []
     sample_count = 0
@@ -343,6 +392,12 @@ def analyze(
         batch_size = int(trace["batch_size"])
         sample_count += batch_size
         activation_modes.add(trace["activation_storage"])
+        trace_analysis_dim = analysis_dim
+        if trace["activation_storage"] == "sketch":
+            trace_analysis_dim = min(
+                analysis_dim, int(trace.get("sketch_dim", analysis_dim))
+            )
+        effective_projection_dims.add(trace_analysis_dim)
         exact = trace["exact"]
         recorded_step_counts.append(int(exact["timestep"].shape[0]))
         representations: dict[str, tuple[torch.Tensor, torch.Tensor | None]] = {
@@ -368,11 +423,14 @@ def analyze(
                     values.detach().float().reshape(values.shape[0], values.shape[1], -1),
                     dim=-1,
                 )
-            _append_temporal(temporal, name, values, analysis_dim, norms)
+            _append_temporal(
+                temporal, name, values, trace_analysis_dim, norms
+            )
             if "/head_" in name and values.ndim >= 4:
                 for head in range(values.shape[2]):
                     measurement = temporal_measurements(
-                        values[:, :, head], max_features=analysis_dim
+                        values[:, :, head],
+                        max_features=trace_analysis_dim,
                     )
                     head_variation[name].append(
                         _finite(measurement["normalized_curvature"])
@@ -386,7 +444,7 @@ def analyze(
         )
         semantic_measurement = temporal_measurements(
             exact["semantic"],
-            max_features=analysis_dim,
+            max_features=trace_analysis_dim,
             exact_norms=semantic_norms,
         )
         semantic_curvature = semantic_measurement["normalized_curvature"]
@@ -617,9 +675,14 @@ def analyze(
         "minimum_recorded_steps": minimum_recorded_steps,
         "activation_storage": sorted(activation_modes),
         "analysis_projection": {
-            "max_features": analysis_dim,
+            "requested_max_features": analysis_dim,
+            "effective_features": sorted(effective_projection_dims),
             "method": "deterministic signed pooled projection",
-            "note": "Full final semantics remain archived; high-dimensional temporal metrics use this bounded projection.",
+            "note": (
+                "All compared representations use the same effective width. "
+                "When activation sketches are present, exact states are projected "
+                "to that sketch width for matched temporal metrics."
+            ),
         },
         "thresholds": {
             "max_forecast_relative_rmse": max_forecast_relative_rmse,
