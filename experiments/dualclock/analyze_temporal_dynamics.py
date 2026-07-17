@@ -312,7 +312,7 @@ def analyze(
     min_speedup: float = 1.5,
     analysis_dim: int = DEFAULT_ANALYSIS_DIM,
     min_trajectories: int = 100,
-    min_steps: int = 100,
+    min_steps: int | None = None,
 ) -> dict[str, Any]:
     directory = Path(trace_dir)
     manifest_path = directory / "manifest.json"
@@ -328,14 +328,18 @@ def analyze(
     class_curvature: dict[int, list[torch.Tensor]] = defaultdict(list)
     content_curvature: dict[str, list[torch.Tensor]] = defaultdict(list)
     content_records: list[tuple[float, torch.Tensor]] = []
+    prompt_records: list[tuple[int, torch.Tensor]] = []
     branch_curvature: dict[str, list[torch.Tensor]] = defaultdict(list)
     head_variation: dict[str, list[torch.Tensor]] = defaultdict(list)
     activation_modes: set[str] = set()
+    modes: set[str] = set()
     recorded_step_counts: list[int] = []
     sample_count = 0
 
     for shard_info in shards:
         trace = torch.load(directory / shard_info["file"], map_location="cpu", weights_only=False)
+        mode = str(trace.get("mode", "c2i"))
+        modes.add(mode)
         batch_size = int(trace["batch_size"])
         sample_count += batch_size
         activation_modes.add(trace["activation_storage"])
@@ -386,11 +390,10 @@ def analyze(
             exact_norms=semantic_norms,
         )
         semantic_curvature = semantic_measurement["normalized_curvature"]
-        labels = trace["condition"].tolist()
         high_ratio = exact["image_high_frequency_energy"].mean(dim=0) / (
             exact["image_low_frequency_energy"].mean(dim=0) + EPS
         )
-        for sample_index, class_id in enumerate(labels):
+        for sample_index in range(batch_size):
             # CFG stream order is [all unconditional, all conditional].
             sample_values = torch.cat(
                 (
@@ -398,7 +401,15 @@ def analyze(
                     semantic_curvature[:, batch_size + sample_index],
                 )
             )
-            class_curvature[int(class_id)].append(sample_values)
+            if mode == "c2i":
+                class_id = int(trace["condition"][sample_index])
+                class_curvature[class_id].append(sample_values)
+            else:
+                prompts = trace.get("prompts") or [
+                    item.get("prompt", "") for item in trace.get("samples", [])
+                ]
+                prompt = prompts[sample_index] if sample_index < len(prompts) else ""
+                prompt_records.append((len(str(prompt).split()), sample_values))
             content_records.append((float(high_ratio[sample_index]), sample_values))
         branch_curvature["unconditional"].append(semantic_curvature[:, :batch_size])
         branch_curvature["conditional"].append(semantic_curvature[:, batch_size:])
@@ -425,6 +436,23 @@ def analyze(
             content_curvature[content].append(values)
     else:
         content_threshold = None
+
+    prompt_complexity: dict[str, list[torch.Tensor]] = defaultdict(list)
+    if prompt_records:
+        word_counts = torch.tensor([item[0] for item in prompt_records], dtype=torch.float32)
+        low_threshold = float(torch.quantile(word_counts, 1.0 / 3.0))
+        high_threshold = float(torch.quantile(word_counts, 2.0 / 3.0))
+        for word_count, values in prompt_records:
+            if word_count <= low_threshold:
+                group = "short"
+            elif word_count <= high_threshold:
+                group = "medium"
+            else:
+                group = "long"
+            prompt_complexity[group].append(values)
+    else:
+        low_threshold = None
+        high_threshold = None
 
     representation_report: dict[str, Any] = {}
     for name, metrics in temporal.items():
@@ -472,9 +500,17 @@ def analyze(
 
     cost = load_baseline_cost(baseline_report)
     minimum_recorded_steps = min(recorded_step_counts, default=0)
+    if len(modes) > 1:
+        raise ValueError(f"Trace directory mixes incompatible modes: {sorted(modes)}")
+    mode = next(iter(modes), "c2i")
+    required_min_steps = (
+        int(min_steps)
+        if min_steps is not None
+        else (50 if mode == "t2i" else 100)
+    )
     evidence_sufficient = (
         sample_count >= min_trajectories
-        and minimum_recorded_steps >= min_steps
+        and minimum_recorded_steps >= required_min_steps
     )
     pit_curvatures = [
         _median_from_summary(value, "normalized_curvature")
@@ -574,6 +610,7 @@ def analyze(
     }
     report = {
         "phase": 1,
+        "mode": mode,
         "trace_directory": str(directory.resolve()),
         "trace_count": len(shards),
         "sample_count": sample_count,
@@ -608,6 +645,14 @@ def analyze(
             str(name): _summary(torch.cat(values) if values else torch.tensor([]))
             for name, values in class_curvature.items()
         },
+        "semantic_curvature_by_prompt_complexity": {
+            name: _summary(torch.cat(values) if values else torch.tensor([]))
+            for name, values in prompt_complexity.items()
+        },
+        "prompt_complexity_word_thresholds": {
+            "short_max": low_threshold,
+            "medium_max": high_threshold,
+        },
         "semantic_curvature_by_image_content": {
             name: _summary(torch.cat(values) if values else torch.tensor([]))
             for name, values in content_curvature.items()
@@ -625,7 +670,7 @@ def analyze(
             "candidates": candidates,
             "evidence_requirements": {
                 "min_trajectories": min_trajectories,
-                "min_steps": min_steps,
+                "min_steps": required_min_steps,
                 "observed_trajectories": sample_count,
                 "observed_minimum_steps": minimum_recorded_steps,
             },
@@ -657,7 +702,11 @@ def main() -> None:
     parser.add_argument("--min-speedup", type=float, default=1.5)
     parser.add_argument("--analysis-dim", type=int, default=DEFAULT_ANALYSIS_DIM)
     parser.add_argument("--min-trajectories", type=int, default=100)
-    parser.add_argument("--min-steps", type=int, default=100)
+    parser.add_argument(
+        "--min-steps",
+        type=int,
+        help="Defaults to 100 for C2I and the official 50 evaluations for T2I.",
+    )
     args = parser.parse_args()
 
     trace_dir = Path(args.trace_dir)

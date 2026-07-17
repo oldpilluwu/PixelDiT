@@ -131,6 +131,21 @@ def guided_velocity(
     return unconditional + scale * (conditional - unconditional)
 
 
+def temporal_extrapolation_ratio(
+    current: torch.Tensor,
+    anchor: torch.Tensor,
+    previous: torch.Tensor,
+    eps: float = 1e-12,
+) -> torch.Tensor:
+    denominator = anchor - previous
+    safe = torch.where(
+        denominator.abs() < eps,
+        torch.where(denominator < 0, -torch.full_like(denominator, eps), torch.full_like(denominator, eps)),
+        denominator,
+    )
+    return (current - anchor) / safe
+
+
 def image_frequency_energy(x: torch.Tensor) -> dict[str, torch.Tensor]:
     """Return inexpensive low/high spatial-frequency energy proxies per image."""
     x_float = x.detach().float()
@@ -173,11 +188,24 @@ class ActivationRecorder:
             self.handles.append(
                 self.model.patch_blocks[index].register_forward_hook(self._patch_hook(index))
             )
-            self.handles.append(
-                self.model.patch_blocks[index].attn.qkv.register_forward_hook(
-                    self._qkv_hook("patch", index)
+            attention = self.model.patch_blocks[index].attn
+            if hasattr(attention, "qkv"):
+                self.handles.append(
+                    attention.qkv.register_forward_hook(
+                        self._qkv_hook("patch", index)
+                    )
                 )
-            )
+            else:
+                self.handles.append(
+                    attention.qkv_x.register_forward_hook(
+                        self._qkv_hook("patch", index)
+                    )
+                )
+                self.handles.append(
+                    attention.qkv_y.register_forward_hook(
+                        self._qkv_hook("text", index)
+                    )
+                )
         for index, block in enumerate(self.model.pixel_blocks):
             self.handles.append(block.register_forward_pre_hook(self._pit_input_hook(index)))
             self.handles.append(block.register_forward_hook(self._pit_output_hook(index)))
@@ -186,11 +214,14 @@ class ActivationRecorder:
             )
 
     def _patch_hook(self, index: int):
-        def hook(_module: torch.nn.Module, _inputs: Any, output: torch.Tensor) -> None:
+        def hook(_module: torch.nn.Module, _inputs: Any, output: Any) -> None:
             if self.active:
-                self.current[f"patch/block_{index}"] = self._pack(output)
+                image_output = output[0] if isinstance(output, tuple) else output
+                self.current[f"patch/block_{index}"] = self._pack(image_output)
+                if isinstance(output, tuple) and len(output) > 1:
+                    self.current[f"text/block_{index}"] = self._pack(output[1])
                 if index == len(self.model.patch_blocks) - 1:
-                    self.current["_final_patch"] = output.detach()
+                    self.current["_final_patch"] = image_output.detach()
 
         return hook
 
@@ -223,7 +254,11 @@ class ActivationRecorder:
         def hook(module: torch.nn.Module, _inputs: Any, output: torch.Tensor) -> None:
             if not self.active:
                 return
-            heads = self.model.patch_blocks[index].attn.num_heads if pathway == "patch" else self.model.pixel_blocks[index].attn.num_heads
+            heads = (
+                self.model.patch_blocks[index].attn.num_heads
+                if pathway in {"patch", "text"}
+                else self.model.pixel_blocks[index].attn.num_heads
+            )
             qkv = output.detach().reshape(output.shape[0], output.shape[1], 3, heads, -1)
             if pathway == "pit":
                 cfg_batch = 2 * self.batch_size
@@ -514,7 +549,9 @@ def collect_c2i_batch(
                     previous = semantic_history[-horizon - 1]
                     anchor_t = time_history[-horizon]
                     previous_t = time_history[-horizon - 1]
-                    ratio = (cfg_timestep - anchor_t) / (anchor_t - previous_t).clamp_min(1e-12)
+                    ratio = temporal_extrapolation_ratio(
+                        cfg_timestep, anchor_t, previous_t
+                    )
                     forecast = anchor + ratio.view(-1, 1, 1) * (anchor - previous)
                     forecast_output = model(cfg_x, cfg_timestep, cfg_condition, s=forecast)
                     forecast_guided = guided_velocity(

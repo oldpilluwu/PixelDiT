@@ -16,7 +16,9 @@ from experiments.dualclock.phase1 import (
     guided_velocity,
     shifted_timesteps,
 )
+from experiments.dualclock.phase1_t2i import collect_t2i_batch
 from pixdit_core.pixeldit_c2i import PixDiT
+from pixdit_core.pixeldit_t2i import PixDiT_T2I
 
 
 class Phase1Test(unittest.TestCase):
@@ -119,6 +121,55 @@ class Phase1Test(unittest.TestCase):
                 x = x + velocity * dt if previous is None else x + dt * (1.5 * velocity - 0.5 * previous)
                 previous = velocity
         self.assertTrue(torch.allclose(trace["final_sample"], x, atol=1e-6, rtol=1e-6))
+
+    def test_t2i_collection_uses_official_solver_and_joint_hooks(self):
+        torch.manual_seed(23)
+        model = PixDiT_T2I(
+            in_channels=3,
+            num_groups=2,
+            hidden_size=32,
+            pixel_hidden_size=8,
+            pixel_attn_hidden_size=32,
+            pixel_num_groups=2,
+            patch_depth=2,
+            pixel_depth=1,
+            patch_size=2,
+            txt_embed_dim=24,
+            txt_max_length=6,
+        ).eval()
+        with torch.no_grad():
+            for parameter in model.parameters():
+                if parameter.is_floating_point():
+                    parameter.normal_(mean=0.0, std=0.03)
+        options = CollectionOptions(
+            num_steps=3,
+            cfg_scale=2.75,
+            guidance_min=0.0,
+            guidance_max=1.0,
+            stale_horizons=(1, 2),
+            activation_storage="sketch",
+            sketch_dim=16,
+            output_dtype=torch.float32,
+            token_groups=0,
+            channel_groups=0,
+        )
+        trace = collect_t2i_batch(
+            model,
+            torch.randn(1, 3, 4, 4),
+            torch.randn(1, 6, 24),
+            torch.randn(1, 6, 24),
+            options,
+            flow_shift=4.0,
+        )
+        self.assertEqual(trace["mode"], "t2i")
+        self.assertEqual(tuple(trace["exact"]["timestep"].shape), (3, 1))
+        self.assertEqual(tuple(trace["exact"]["semantic"].shape), (3, 2, 4, 32))
+        self.assertIn("text/block_0", trace["representations"])
+        self.assertIn("text/block_1/head_q", trace["representations"])
+        self.assertIn(
+            "linear_raw_patch/h2/guided/relative_rmse",
+            trace["substitutions"],
+        )
 
     def test_analysis_writes_all_phase1_sections(self):
         model = self.tiny_model()

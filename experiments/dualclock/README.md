@@ -264,3 +264,50 @@ python -m unittest \
   experiments.dualclock.tests.test_phase0 \
   experiments.dualclock.tests.test_phase1 -v
 ```
+
+## Phase 1: T2I-1024
+
+The T2I collector follows the accepted stage-3 1024 configuration, official
+50-evaluation flow DPM-Solver++ multistep update, CFG 2.75, flow shift 4, CHI
+prompt expansion, and Gemma text embeddings. Conditional and unconditional
+branches, image patch states, text-stream states, PiT states, raw final patch
+tokens, and fused semantic tokens are recorded separately. The text mask is
+recorded but not forwarded, matching the released `PixDiTTrainer.forward`
+behavior frozen in Phase 0.
+
+Smoke test:
+
+```bash
+python -m experiments.dualclock.collect_trajectories_t2i \
+  --manifest experiments/dualclock/reports/20260717T081130Z/regression/t2i_100.jsonl \
+  --baseline-report experiments/dualclock/reports/20260717T081130Z/t2i1024_eager.json \
+  --limit 2 --num-steps 5 \
+  --token-groups 0 --channel-groups 0
+```
+
+Full official trajectory study:
+
+```bash
+python -m experiments.dualclock.collect_trajectories_t2i \
+  --manifest experiments/dualclock/reports/20260717T081130Z/regression/t2i_100.jsonl \
+  --baseline-report experiments/dualclock/reports/20260717T081130Z/t2i1024_eager.json \
+  --limit 100 --num-steps 50 \
+  --cfg-scale 2.75 --flow-shift 4 \
+  --activation-storage sketch --stale-horizons 1,2,3
+```
+
+At 1024px, exact solver states, raw patch states, fused semantics, and
+velocities require approximately 4 GiB per prompt even when auxiliary
+activations use sketches. Budget roughly 400 GiB for 100 prompts, or start with
+10 prompts and keep the result labeled as exploratory.
+
+Analyze either timestamped trace directory with the shared analyzer:
+
+```bash
+python -m experiments.dualclock.analyze_temporal_dynamics \
+  --trace-dir experiments/dualclock/traces/phase1_t2i1024/<timestamp>
+```
+
+The analyzer automatically uses the released 50-evaluation threshold for T2I
+and reports semantic curvature by prompt-length complexity in addition to CFG
+branch and image-frequency splits.
