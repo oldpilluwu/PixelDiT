@@ -311,3 +311,32 @@ python -m experiments.dualclock.analyze_temporal_dynamics \
 The analyzer automatically uses the released 50-evaluation threshold for T2I
 and reports semantic curvature by prompt-length complexity in addition to CFG
 branch and image-frequency splits.
+
+## Alternative directions from the same traces
+
+The saved C2I and T2I trajectories can be mined without recollection for
+layer-specific reuse, early/middle/late cache error, low-rank raw-patch
+residuals, token/channel volatility, CFG branch redundancy, velocity hard
+steps, spatial-frequency evolution, cheap harmful-step predictors, and
+class/prompt-group error:
+
+```bash
+python -m experiments.dualclock.analyze_alternative_directions \
+  --trace-dir experiments/dualclock/traces/<timestamp>
+```
+
+This writes `alternative_analysis/alternative_directions.json` for downstream
+experiments and `alternative_analysis/alternative_directions.md` for quick
+review. On large T2I-1024 traces, pass `--skip-velocity-frequency` to skip the
+extra full-resolution velocity FFT pass.
+
+Run the focused extraction tests with:
+
+```bash
+python -m unittest \
+  experiments.dualclock.tests.test_alternative_directions -v
+```
+
+The tests include a collected two-sample C2I trajectory and assert that every
+analysis family above is actually populated. Synthetic checks also protect the
+tie-safe AUROC and low-rank residual calculations.
