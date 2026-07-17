@@ -1,8 +1,8 @@
-# DualClock Phase 0
+# DualClock experiments
 
-This directory implements baseline reproduction and instrumentation without
-changing `pixdit_core/`. Reports, generated images, traces, and checkpoints are
-ignored by Git.
+This directory implements Phase 0 baseline reproduction and Phase 1
+slow-semantics experiments without changing `pixdit_core/`. Reports, generated
+images, traces, and checkpoints are ignored by Git.
 
 ## A6000 setup
 
@@ -188,4 +188,72 @@ python -m experiments.dualclock.capture_environment --help
 python -m experiments.dualclock.parity --help
 python -m experiments.dualclock.benchmark --help
 python -m experiments.dualclock.sample_c2i --help
+```
+
+## Phase 1: collect exact trajectories
+
+Phase 1 starts from the accepted official C2I-256 track. The collector verifies
+semantic extraction/reinjection parity before writing any trace, follows the
+released AB2/Flow-DPM sampling update, and keeps unconditional and conditional
+CFG branches separate.
+
+```bash
+python -m experiments.dualclock.collect_trajectories \
+  --config c2i/configs/pix256_xl.yaml \
+  --checkpoint imagenet256_pixeldit_xl_epoch320.ckpt \
+  --manifest experiments/dualclock/regression/c2i_1000.jsonl \
+  --baseline-report experiments/dualclock/reports/20260717T042058Z/c2i256_eager.json \
+  --height 256 --width 256 --limit 100 --batch-size 1 \
+  --num-steps 100 --cfg-scale 2.75 --timeshift 1.0 \
+  --guidance-min 0.1 --guidance-max 0.9
+```
+
+Each shard contains exact `x_t`, full final semantic tokens, conditional and
+unconditional velocities, guided velocity, selected early/middle/late patch
+states, every PiT block input/output, and per-head Q/K/V summaries. It also
+contains same-state errors for stale semantics, linear semantic forecasts, and
+equivalently stale generic PiT features; grouped token/channel interventions
+measure decoder influence and empirical Lipschitz ratios.
+
+The default `--activation-storage sketch` bounds the patch/PiT archive size.
+These activations are deterministic signed pooled temporal sketches with exact L2
+norms; exact `x_t`, final semantics, and velocities are still retained. Use
+`--activation-storage full` for a small number of exact activation-heavy
+trajectories. Full mode is intentionally explicit because all PiT inputs and
+outputs at 100 evaluations consume substantial storage.
+
+As in the released sampler, noise and the solver state remain FP32 while model
+operations run under BF16 autocast. The default `--trace-dtype same` preserves
+semantic activations and velocities in their native model dtype; solver states
+are always archived in their native FP32 dtype.
+
+Run analysis on the timestamped trace directory:
+
+```bash
+python -m experiments.dualclock.analyze_temporal_dynamics \
+  --trace-dir experiments/dualclock/traces/<timestamp>
+```
+
+The analyzer reports normalized first and second differences, cosine
+similarities at lags 1–5, temporal rank, timestep-frequency energy, early/mid/
+late behavior, CFG branch and class splits, image-frequency splits, per-layer
+and per-head variation, substitution errors, semantic/velocity error
+correlation, decoder sensitivity, and a latency-based refresh cost model.
+High-dimensional temporal calculations use a bounded deterministic signed projection
+(`--analysis-dim`, default 4096), while the archived final semantics remain
+full.
+
+It writes `phase1_report.json`, `phase1_report.md`, and `phase1_gate.json`.
+Thresholds are explicit CLI parameters. A `PASS` is evidence to begin Phase 2,
+not a measured acceleration claim; a failed gate means the plan says to stop or
+redirect DualClock.
+
+For a smoke test, use `--limit 2 --num-steps 5`, disable the expensive grouped
+influence probes with `--token-groups 0 --channel-groups 0`, and then analyze
+the resulting directory. Run the complete local test suite with:
+
+```bash
+python -m unittest \
+  experiments.dualclock.tests.test_phase0 \
+  experiments.dualclock.tests.test_phase1 -v
 ```
