@@ -343,6 +343,11 @@ def analyze(
         recorded_step_counts.append(int(exact["timestep"].shape[0]))
         representations: dict[str, tuple[torch.Tensor, torch.Tensor | None]] = {
             "final_semantic": (exact["semantic"], None),
+            **(
+                {"raw_final_patch": (exact["raw_final_patch"], None)}
+                if "raw_final_patch" in exact
+                else {}
+            ),
             "velocity/branches": (exact["velocity_branches"], None),
             "velocity/guided": (exact["velocity_guided"], None),
             "pixel_state": (exact["x_t"], None),
@@ -443,7 +448,12 @@ def analyze(
     }
 
     correlations: dict[str, float | None] = {}
-    for method in ("stale_semantic", "linear_semantic"):
+    for method in (
+        "stale_semantic",
+        "linear_semantic",
+        "stale_raw_patch",
+        "linear_raw_patch",
+    ):
         horizons = sorted(
             {
                 int(name.split("/")[1][1:])
@@ -471,14 +481,19 @@ def analyze(
         for name, value in representation_report.items()
         if name.startswith("pit/") and name.endswith("/output")
     ]
-    generic_curvature = min(pit_curvatures, default=float("inf"))
+    generic_curvature = (
+        float(torch.tensor(pit_curvatures).median())
+        if pit_curvatures
+        else float("inf")
+    )
     velocity_curvature = _median_from_summary(
         representation_report["velocity/guided"], "normalized_curvature"
     )
     semantic_names = [
         name
         for name in representation_report
-        if name == "final_semantic" or re.fullmatch(r"patch/block_\d+", name)
+        if name in {"final_semantic", "raw_final_patch"}
+        or re.fullmatch(r"patch/block_\d+", name)
     ]
     candidates: dict[str, Any] = {}
     for name in semantic_names:
@@ -486,10 +501,14 @@ def analyze(
             representation_report[name], "normalized_curvature"
         )
         lower_curvature = curvature < generic_curvature and curvature < velocity_curvature
-        # Only the final semantic representation has a direct decoder contract
-        # in the released model. Earlier layers are reported as candidates for a
-        # future split point, but cannot borrow final-state substitution evidence.
-        has_decoder_contract = name == "final_semantic"
+        # The decoder accepts the fused final state. The raw final patch state
+        # has an experimental contract that applies exact current timestep fusion.
+        has_decoder_contract = name in {"final_semantic", "raw_final_patch"}
+        candidate_methods = (
+            ("linear_raw_patch", "stale_raw_patch")
+            if name == "raw_final_patch"
+            else ("linear_semantic", "stale_semantic")
+        )
         useful_predictability = False
         better_than_generic = False
         quality_interval = 1
@@ -497,7 +516,7 @@ def analyze(
         for horizon in sorted({int(item.split("/")[1][1:]) for item in substitutions if "/h" in item}):
             if not has_decoder_contract:
                 break
-            for method in ("linear_semantic", "stale_semantic"):
+            for method in candidate_methods:
                 rmse_key = f"{method}/h{horizon}/guided/relative_rmse"
                 cosine_key = f"{method}/h{horizon}/guided/cosine_error"
                 generic_key = f"stale_generic/h{horizon}/guided/relative_rmse"
@@ -570,6 +589,11 @@ def analyze(
             "min_forecast_cosine": min_forecast_cosine,
             "substantial_error_factor": substantial_factor,
             "min_predicted_speedup": min_speedup,
+        },
+        "curvature_references": {
+            "median_pit_output_curvature": generic_curvature,
+            "guided_velocity_curvature": velocity_curvature,
+            "comparison_rule": "candidate median curvature must be below both references",
         },
         "representations": representation_report,
         "per_head_curvature": {

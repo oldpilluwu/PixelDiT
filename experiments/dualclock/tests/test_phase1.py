@@ -69,12 +69,23 @@ class Phase1Test(unittest.TestCase):
         )
         self.assertEqual(tuple(trace["exact"]["x_t"].shape), (4, 1, 3, 4, 4))
         self.assertEqual(tuple(trace["exact"]["semantic"].shape), (4, 2, 4, 32))
+        self.assertEqual(
+            tuple(trace["exact"]["raw_final_patch"].shape), (4, 2, 4, 32)
+        )
         self.assertEqual(tuple(trace["exact"]["velocity_branches"].shape), (4, 2, 3, 4, 4))
         self.assertIn("patch/block_0", trace["representations"])
         self.assertIn("pit/block_0/input", trace["representations"])
         self.assertIn("pit/block_1/output", trace["representations"])
         self.assertIn("patch/block_0/head_q", trace["representations"])
         self.assertIn("stale_semantic/h2/guided/relative_rmse", trace["substitutions"])
+        self.assertIn(
+            "stale_raw_patch/h2/guided/relative_rmse",
+            trace["substitutions"],
+        )
+        self.assertIn(
+            "linear_raw_patch/h2/guided/relative_rmse",
+            trace["substitutions"],
+        )
         self.assertIn("stale_generic/h1/guided/relative_rmse", trace["substitutions"])
         self.assertEqual(len(trace["sensitivity"]), 4)
 
@@ -177,6 +188,7 @@ class Phase1Test(unittest.TestCase):
         self.assertFalse(
             any("/head_" in name for name in report["gate"]["candidates"])
         )
+        self.assertIn("raw_final_patch", report["gate"]["candidates"])
 
     def test_cost_model_speedup(self):
         cost = {"available": True, "semantic_fraction": 0.75}

@@ -166,7 +166,13 @@ def main() -> None:
         "token_groups": args.token_groups,
         "channel_groups": args.channel_groups,
         "measurement_contract": {
-            "exact": ["x_t", "final semantic tokens", "velocity branches", "guided velocity"],
+            "exact": [
+                "x_t",
+                "raw final patch tokens",
+                "final semantic tokens",
+                "velocity branches",
+                "guided velocity",
+            ],
             "semantic_and_velocity_storage_lossless": (
                 trace_dtype == dtype or trace_dtype == torch.float32
             ),

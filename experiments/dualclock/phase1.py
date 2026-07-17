@@ -10,7 +10,7 @@ import torch
 import torch.nn.functional as F
 
 
-TRACE_SCHEMA_VERSION = 1
+TRACE_SCHEMA_VERSION = 2
 BRANCH_NAMES = ("unconditional", "conditional")
 
 
@@ -376,6 +376,7 @@ def collect_c2i_batch(
     x = noise
     previous_velocity: torch.Tensor | None = None
     semantic_history: list[torch.Tensor] = []
+    raw_patch_history: list[torch.Tensor] = []
     time_history: list[torch.Tensor] = []
     generic_history: list[torch.Tensor] = []
 
@@ -408,6 +409,9 @@ def collect_c2i_batch(
             # denoiser operations run under BF16 autocast.
             exact_lists["x_t"].append(x.detach().cpu())
             exact_lists["semantic"].append(_cpu_tensor(semantic, options.output_dtype))
+            exact_lists["raw_final_patch"].append(
+                _cpu_tensor(patch_output, options.output_dtype)
+            )
             exact_lists["velocity_branches"].append(_cpu_tensor(exact_branches, options.output_dtype))
             exact_lists["velocity_guided"].append(_cpu_tensor(exact_guided, options.output_dtype))
             frequency = image_frequency_energy(x)
@@ -426,11 +430,22 @@ def collect_c2i_batch(
                 if not available:
                     nan_batch = torch.full((2 * batch_size,), float("nan"))
                     nan_guided = torch.full((batch_size,), float("nan"))
-                    for method in ("stale_semantic", "linear_semantic", "stale_generic"):
+                    for method in (
+                        "stale_semantic",
+                        "linear_semantic",
+                        "stale_raw_patch",
+                        "linear_raw_patch",
+                        "stale_generic",
+                    ):
                         for metric in ("mse", "rmse", "relative_rmse", "cosine_error"):
                             substitution_lists[f"{method}/h{horizon}/branches/{metric}"].append(nan_batch)
                             substitution_lists[f"{method}/h{horizon}/guided/{metric}"].append(nan_guided)
-                    for method in ("stale_semantic", "linear_semantic"):
+                    for method in (
+                        "stale_semantic",
+                        "linear_semantic",
+                        "stale_raw_patch",
+                        "linear_raw_patch",
+                    ):
                         for metric in ("l2", "relative_l2"):
                             substitution_lists[f"{method}/h{horizon}/semantic/{metric}"].append(nan_batch)
                         substitution_lists[f"{method}/h{horizon}/lipschitz"].append(nan_batch)
@@ -449,6 +464,49 @@ def collect_c2i_batch(
                 _append_metric(substitution_lists, f"stale_semantic/h{horizon}/guided", stale_guided_error)
                 substitution_lists[f"stale_semantic/h{horizon}/lipschitz"].append(
                     stale_branch_error["rmse"] / stale_sem_error["l2"].clamp_min(1e-12)
+                )
+
+                # The timestep embedding is known at every microstep. Reuse
+                # only the raw patch state, then apply the exact current fusion.
+                stale_raw_patch = raw_patch_history[-horizon]
+                stale_raw_semantic = F.silu(t_emb + stale_raw_patch)
+                stale_raw_output = model(
+                    cfg_x, cfg_timestep, cfg_condition, s=stale_raw_semantic
+                )
+                stale_raw_guided = guided_velocity(
+                    stale_raw_output,
+                    timestep,
+                    options.cfg_scale,
+                    options.guidance_min,
+                    options.guidance_max,
+                )
+                stale_raw_sem_error = compare_semantics(
+                    semantic, stale_raw_semantic
+                )
+                stale_raw_branch_error = compare_velocity(
+                    exact_branches, stale_raw_output
+                )
+                stale_raw_guided_error = compare_velocity(
+                    exact_guided, stale_raw_guided
+                )
+                _append_metric(
+                    substitution_lists,
+                    f"stale_raw_patch/h{horizon}/semantic",
+                    stale_raw_sem_error,
+                )
+                _append_metric(
+                    substitution_lists,
+                    f"stale_raw_patch/h{horizon}/branches",
+                    stale_raw_branch_error,
+                )
+                _append_metric(
+                    substitution_lists,
+                    f"stale_raw_patch/h{horizon}/guided",
+                    stale_raw_guided_error,
+                )
+                substitution_lists[f"stale_raw_patch/h{horizon}/lipschitz"].append(
+                    stale_raw_branch_error["rmse"]
+                    / stale_raw_sem_error["l2"].clamp_min(1e-12)
                 )
 
                 if len(semantic_history) >= horizon + 1:
@@ -471,16 +529,78 @@ def collect_c2i_batch(
                     substitution_lists[f"linear_semantic/h{horizon}/lipschitz"].append(
                         forecast_branch_error["rmse"] / forecast_sem_error["l2"].clamp_min(1e-12)
                     )
+
+                    raw_anchor = raw_patch_history[-horizon]
+                    raw_previous = raw_patch_history[-horizon - 1]
+                    raw_forecast = raw_anchor + ratio.view(-1, 1, 1) * (
+                        raw_anchor - raw_previous
+                    )
+                    raw_forecast_semantic = F.silu(t_emb + raw_forecast)
+                    raw_forecast_output = model(
+                        cfg_x,
+                        cfg_timestep,
+                        cfg_condition,
+                        s=raw_forecast_semantic,
+                    )
+                    raw_forecast_guided = guided_velocity(
+                        raw_forecast_output,
+                        timestep,
+                        options.cfg_scale,
+                        options.guidance_min,
+                        options.guidance_max,
+                    )
+                    raw_forecast_sem_error = compare_semantics(
+                        semantic, raw_forecast_semantic
+                    )
+                    raw_forecast_branch_error = compare_velocity(
+                        exact_branches, raw_forecast_output
+                    )
+                    raw_forecast_guided_error = compare_velocity(
+                        exact_guided, raw_forecast_guided
+                    )
+                    _append_metric(
+                        substitution_lists,
+                        f"linear_raw_patch/h{horizon}/semantic",
+                        raw_forecast_sem_error,
+                    )
+                    _append_metric(
+                        substitution_lists,
+                        f"linear_raw_patch/h{horizon}/branches",
+                        raw_forecast_branch_error,
+                    )
+                    _append_metric(
+                        substitution_lists,
+                        f"linear_raw_patch/h{horizon}/guided",
+                        raw_forecast_guided_error,
+                    )
+                    substitution_lists[
+                        f"linear_raw_patch/h{horizon}/lipschitz"
+                    ].append(
+                        raw_forecast_branch_error["rmse"]
+                        / raw_forecast_sem_error["l2"].clamp_min(1e-12)
+                    )
                 else:
                     nan_batch = torch.full((2 * batch_size,), float("nan"))
-                    for metric in ("l2", "relative_l2"):
-                        substitution_lists[f"linear_semantic/h{horizon}/semantic/{metric}"].append(nan_batch)
-                    for metric in ("mse", "rmse", "relative_rmse", "cosine_error"):
-                        substitution_lists[f"linear_semantic/h{horizon}/branches/{metric}"].append(nan_batch)
-                        substitution_lists[f"linear_semantic/h{horizon}/guided/{metric}"].append(
-                            torch.full((batch_size,), float("nan"))
-                        )
-                    substitution_lists[f"linear_semantic/h{horizon}/lipschitz"].append(nan_batch)
+                    for method in ("linear_semantic", "linear_raw_patch"):
+                        for metric in ("l2", "relative_l2"):
+                            substitution_lists[
+                                f"{method}/h{horizon}/semantic/{metric}"
+                            ].append(nan_batch)
+                        for metric in (
+                            "mse",
+                            "rmse",
+                            "relative_rmse",
+                            "cosine_error",
+                        ):
+                            substitution_lists[
+                                f"{method}/h{horizon}/branches/{metric}"
+                            ].append(nan_batch)
+                            substitution_lists[
+                                f"{method}/h{horizon}/guided/{metric}"
+                            ].append(torch.full((batch_size,), float("nan")))
+                        substitution_lists[
+                            f"{method}/h{horizon}/lipschitz"
+                        ].append(nan_batch)
 
                 stale_generic = generic_history[-horizon]
 
@@ -528,10 +648,12 @@ def collect_c2i_batch(
                     sensitivity_rows.append(row)
 
             semantic_history.append(semantic.detach())
+            raw_patch_history.append(patch_output.detach())
             time_history.append(cfg_timestep.detach())
             generic_history.append(current_generic.detach())
             max_history = max(options.stale_horizons, default=1) + 1
             semantic_history = semantic_history[-max_history:]
+            raw_patch_history = raw_patch_history[-max_history:]
             time_history = time_history[-max_history:]
             generic_history = generic_history[-max_history:]
 

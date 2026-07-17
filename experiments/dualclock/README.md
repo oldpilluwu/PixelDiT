@@ -215,6 +215,11 @@ contains same-state errors for stale semantics, linear semantic forecasts, and
 equivalently stale generic PiT features; grouped token/channel interventions
 measure decoder influence and empirical Lipschitz ratios.
 
+The collector also archives the exact raw final patch state before timestep
+fusion. Its controlled substitutions reuse or forecast that raw state and then
+apply the exact current timestep embedding. This separates genuinely unknown
+semantic evolution from the known, inexpensive timestep-conditioning update.
+
 The default `--activation-storage sketch` bounds the patch/PiT archive size.
 These activations are deterministic signed pooled temporal sketches with exact L2
 norms; exact `x_t`, final semantics, and velocities are still retained. Use
