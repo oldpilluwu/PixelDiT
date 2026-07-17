@@ -120,6 +120,13 @@ python tools/compute_flops.py --config c2i/configs/pix256_xl.yaml
 python tools/compute_flops.py --config t2i/configs/PixelDiT_1024px_pixel_diffusion_stage3.yaml --height 1024 --width 1024
 ```
 
+## DualClock Phase 0
+
+The experimental baseline reproduction, component profiler, regression
+manifests, and semantic bypass parity harness live under
+[`experiments/dualclock/`](experiments/dualclock/README.md). They do not modify
+the released `pixdit_core/` path.
+
 ## Acknowledgements
 We would like to thank the authors of [PixNerd](https://github.com/MCG-NJU/PixNerd) and [SANA](https://github.com/NVlabs/SANA) for sharing their code. We also thank the [SANA team](https://arxiv.org/pdf/2410.10629) for sharing their text-to-image training data.
 
