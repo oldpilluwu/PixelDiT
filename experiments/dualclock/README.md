@@ -340,3 +340,23 @@ python -m unittest \
 The tests include a collected two-sample C2I trajectory and assert that every
 analysis family above is actually populated. Synthetic checks also protect the
 tie-safe AUROC and low-rank residual calculations.
+
+## Phase 1.5: causal validation before recollection
+
+Before running a PiT layer sweep, validate the adaptive-cache signal on the
+existing C2I shards:
+
+```bash
+python -m experiments.dualclock.validate_alternative_directions \
+  --trace-dir experiments/dualclock/traces/phase1_c2i256_raw/<timestamp> \
+  --folds 5 --harmful-threshold 0.05 --bootstrap-samples 10000
+```
+
+This analysis excludes current semantic and raw-patch changes from the
+predictor. It uses trajectory-level held-out folds, paired trajectory bootstrap
+intervals, and same-state adaptive-policy simulations. Results are written to
+`phase1_5_analysis/phase1_5_report.json` and `phase1_5_report.md`.
+
+The policy curves are not sampler rollouts or measured speedups. Proceed to a
+small PiT layer sweep only when the report recommendation is
+`run_small_pit_layer_sweep`.
