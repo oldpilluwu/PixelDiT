@@ -1,8 +1,9 @@
 # DualClock experiments
 
-This directory implements Phase 0 baseline reproduction and Phase 1
-slow-semantics experiments without changing `pixdit_core/`. Reports, generated
-images, traces, and checkpoints are ignored by Git.
+This directory implements Phase 0 baseline reproduction, Phase 1
+slow-semantics experiments, and the redirected Phase 2 terminal-PiT caching
+rollouts without changing `pixdit_core/`. Reports, generated images, traces,
+predictors, and checkpoints are ignored by Git.
 
 ## A6000 setup
 
@@ -360,3 +361,55 @@ intervals, and same-state adaptive-policy simulations. Results are written to
 The policy curves are not sampler rollouts or measured speedups. Proceed to a
 small PiT layer sweep only when the report recommendation is
 `run_small_pit_layer_sweep`.
+
+## Phase 2: terminal-PiT cache rollouts
+
+Phase 1 rejected semantic forecasting and selected the output of the terminal
+PiT block as the only viable reuse boundary. Phase 2 therefore tests a generic
+terminal-state cache rather than adding semantic transport. The cached path in
+`phase2.py` bypasses patch embedding, all patch blocks, pixel embedding, and
+all PiT blocks; it executes only the released final projection and fold.
+
+The original 100 trajectory shards were deleted after Phase 1. Regenerate them
+with the command recorded in `notes/phase_1.md`, then export the causal ridge
+predictors:
+
+```bash
+python -m experiments.dualclock.fit_phase2_predictor \
+  --trace-dir experiments/dualclock/traces/phase1_c2i256_raw/<new_timestamp> \
+  --output experiments/dualclock/traces/phase2_c2i256_predictor.json \
+  --quantiles 0.50,0.75
+```
+
+Run the ten-sample smoke stage:
+
+```bash
+python -m experiments.dualclock.run_phase2 \
+  --config c2i/configs/pix256_xl.yaml \
+  --checkpoint imagenet256_pixeldit_xl_epoch320.ckpt \
+  --manifest experiments/dualclock/reports/20260717T042058Z/regression/c2i_1000.jsonl \
+  --predictor experiments/dualclock/traces/phase2_c2i256_predictor.json \
+  --output-dir experiments/dualclock/reports/phase2_c2i256_smoke \
+  --height 256 --width 256 --batch-size 1 --limit 10 \
+  --num-steps 100 --cfg-scale 2.75 --timeshift 1 \
+  --guidance-min 0.1 --guidance-max 0.9 \
+  --save-png
+```
+
+The default comparison includes exact `k=1`, fixed `k=2`, adaptive q=0.50,
+adaptive q=0.75, q=0.75 with the Phase 1 late-step guardrail, and a
+timestep-only adaptive ablation. The report records synchronized end-to-end
+latency, peak memory, actual refresh counts, policy overhead, decision reasons,
+paired pixel/frequency errors, and optional LPIPS. Every variant also emits
+`samples.npz` for the external ADM FID/sFID/IS/precision/recall evaluation.
+
+After the smoke screen passes, rerun with `--limit 100`, then with
+`--limit 5000`. A report remains explicitly gate-incomplete until the external
+distributional metrics are attached. Do not infer a Phase 2 pass from
+same-state Phase 1 errors or from speed alone.
+
+Run all focused Phase 2 unit checks with:
+
+```bash
+python -m unittest experiments.dualclock.tests.test_phase2 -v
+```
